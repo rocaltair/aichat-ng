@@ -26,8 +26,9 @@ use fancy_regex::Regex;
 use reedline::CursorConfig;
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, Reedline,
-    ReedlineEvent, ReedlineMenu, ValidationResult, Validator, Vi,
+    ColumnarMenu, EditCommand, EditMode, Emacs, FileBackedHistory, KeyCode, KeyModifiers,
+    Keybindings, Reedline, ReedlineEvent, ReedlineMenu, ValidationResult, Validator, Vi,
+    HISTORY_SIZE,
 };
 use reedline::{MenuBuilder, Signal};
 use std::sync::LazyLock;
@@ -295,6 +296,14 @@ Type ".help" for additional help.
             .use_bracketed_paste(true)
             .with_validator(Box::new(ReplValidator))
             .with_ansi_colors(true);
+
+        if config.read().save_repl_history {
+            let history_file = Config::local_path("history.txt");
+            editor = editor.with_history(Box::new(FileBackedHistory::with_file(
+                HISTORY_SIZE,
+                history_file,
+            )?));
+        }
 
         if let Ok(cmd) = config.read().editor() {
             let temp_file = temp_file("-repl-", ".md");

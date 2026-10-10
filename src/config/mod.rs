@@ -147,6 +147,7 @@ pub struct Config {
     pub serve_addr: Option<String>,
     pub user_agent: Option<String>,
     pub save_shell_history: bool,
+    pub save_repl_history: bool,
     pub sync_models_url: Option<String>,
 
     pub clients: Vec<ClientConfig>,
@@ -224,6 +225,7 @@ impl Default for Config {
             serve_addr: None,
             user_agent: None,
             save_shell_history: true,
+            save_repl_history: false,
             sync_models_url: None,
 
             clients: vec![],
