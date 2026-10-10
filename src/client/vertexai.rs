@@ -137,7 +137,12 @@ fn prepare_chat_completions(
             body
         }
         ModelCategory::Mistral => {
-            let mut body = openai_build_chat_completions_body(data, &self_.model, false);
+            let mut body = openai_build_chat_completions_body(
+                data,
+                &self_.model,
+                false,
+                self_.global_config().read().show_usage,
+            );
             if let Some(body_obj) = body.as_object_mut() {
                 body_obj["model"] = strip_model_version(self_.model.real_name()).into();
             }

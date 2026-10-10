@@ -46,7 +46,12 @@ fn prepare_chat_completions(
     let url = format!("{api_base}/chat/completions");
 
     // llama.cpp uses native audio input with the `input_audio` field
-    let body = openai_build_chat_completions_body(data, &self_.model, true);
+    let body = openai_build_chat_completions_body(
+        data,
+        &self_.model,
+        true,
+        self_.global_config().read().show_usage,
+    );
 
     let mut request_data = RequestData::new(url, body);
 

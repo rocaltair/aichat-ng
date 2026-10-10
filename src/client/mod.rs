@@ -103,7 +103,7 @@ mod integration_audio_video {
         ]);
         let messages = vec![Message::new(MessageRole::User, content)];
         let data = make_chat_data(messages, &model);
-        let body = openai_build_chat_completions_body(data, &model, true);
+        let body = openai_build_chat_completions_body(data, &model, true, false);
 
         let msgs = body["messages"].as_array().unwrap();
         let content_arr = msgs[0]["content"].as_array().unwrap();
@@ -129,7 +129,7 @@ mod integration_audio_video {
         ]);
         let messages = vec![Message::new(MessageRole::User, content)];
         let data = make_chat_data(messages, &model);
-        let body = openai_build_chat_completions_body(data, &model, false);
+        let body = openai_build_chat_completions_body(data, &model, false, false);
 
         let msgs = body["messages"].as_array().unwrap();
         let content_arr = msgs[0]["content"].as_array().unwrap();
@@ -163,7 +163,7 @@ mod integration_audio_video {
         let content = MessageContent::Array(parts);
         let messages = vec![Message::new(MessageRole::User, content)];
         let data = make_chat_data(messages, &model);
-        let body = openai_build_chat_completions_body(data, &model, true);
+        let body = openai_build_chat_completions_body(data, &model, true, false);
 
         let msgs = body["messages"].as_array().unwrap();
         let content_arr = msgs[0]["content"].as_array().unwrap();

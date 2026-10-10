@@ -57,6 +57,12 @@ pub struct Cli {
     /// Hide the model's reasoning (`<think>...</think>`) in the output
     #[clap(long)]
     pub hide_think: bool,
+    /// Show a usage line after each response (tokens, speed, elapsed time)
+    #[clap(long)]
+    pub show_usage: bool,
+    /// Turn off the usage line after each response
+    #[clap(long)]
+    pub no_show_usage: bool,
     /// Display the message without sending it
     #[clap(long)]
     pub dry_run: bool,

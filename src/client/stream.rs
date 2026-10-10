@@ -14,6 +14,7 @@ pub struct SseHandler {
     buffer: String,
     tool_calls: Vec<ToolCall>,
     think_filter: Option<ThinkFilter>,
+    usage: Option<(u64, u64)>,
 }
 
 impl SseHandler {
@@ -24,7 +25,17 @@ impl SseHandler {
             buffer: String::new(),
             tool_calls: Vec::new(),
             think_filter: None,
+            usage: None,
         }
+    }
+
+    /// Record the token usage reported by the provider, as `(input, output)`.
+    pub fn set_usage(&mut self, input_tokens: u64, output_tokens: u64) {
+        self.usage = Some((input_tokens, output_tokens));
+    }
+
+    pub fn usage(&self) -> Option<(u64, u64)> {
+        self.usage
     }
 
     /// Drop `<think>...</think>` blocks from the emitted text. The full text is

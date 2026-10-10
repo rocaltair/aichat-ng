@@ -49,7 +49,12 @@ fn prepare_chat_completions(
         .unwrap_or_else(|_| API_BASE.to_string());
 
     let url = format!("{}/chat", api_base.trim_end_matches('/'));
-    let mut body = openai_build_chat_completions_body(data, &self_.model, false);
+    let mut body = openai_build_chat_completions_body(
+        data,
+        &self_.model,
+        false,
+        self_.global_config().read().show_usage,
+    );
     if let Some(obj) = body.as_object_mut() {
         if let Some(top_p) = obj.remove("top_p") {
             obj.insert("p".to_string(), top_p);

@@ -140,6 +140,7 @@ pub struct Config {
     pub highlight: bool,
     pub repl_spinner: bool,
     pub hide_think: bool,
+    pub show_usage: bool,
     pub theme: Option<String>,
     pub left_prompt: Option<String>,
     pub right_prompt: Option<String>,
@@ -218,6 +219,7 @@ impl Default for Config {
             highlight: true,
             repl_spinner: true,
             hide_think: false,
+            show_usage: true,
             theme: None,
             left_prompt: None,
             right_prompt: None,
@@ -699,6 +701,10 @@ impl Config {
             "hide_think" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
                 config.write().hide_think = value;
+            }
+            "show_usage" => {
+                let value = value.parse().with_context(|| "Invalid value")?;
+                config.write().show_usage = value;
             }
             _ => bail!("Unknown key '{key}'"),
         }

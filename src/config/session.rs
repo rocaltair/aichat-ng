@@ -16,6 +16,10 @@ use std::sync::LazyLock;
 
 static RE_AUTONAME_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d{8}T\d{6}-").unwrap());
 
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Session {
     #[serde(rename(serialize = "model", deserialize = "model"))]
@@ -43,6 +47,9 @@ pub struct Session {
     messages: Vec<Message>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     data_urls: HashMap<String, String>,
+    /// Cumulative output tokens produced in this session (see `--show-usage`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    output_tokens: usize,
 
     #[serde(skip)]
     model: Model,
@@ -141,6 +148,15 @@ impl Session {
 
     pub fn tokens(&self) -> usize {
         self.tokens
+    }
+
+    /// Cumulative output tokens produced in this session.
+    pub fn output_tokens(&self) -> usize {
+        self.output_tokens
+    }
+
+    pub fn add_output_tokens(&mut self, tokens: usize) {
+        self.output_tokens += tokens;
     }
 
     pub fn update_tokens(&mut self) {

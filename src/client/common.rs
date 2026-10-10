@@ -17,7 +17,7 @@ use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::unbounded_channel;
 
 const MODELS_YAML: &str = include_str!("../../models.yaml");
@@ -464,6 +464,60 @@ pub async fn create_openai_compatible_client_config(
     Ok(Some((model, clients)))
 }
 
+/// Print the one-line usage summary (when `show_usage` is enabled) and add the
+/// response's output tokens to the running session total.
+fn report_usage(
+    client: &dyn Client,
+    input: &Input,
+    provider_usage: Option<(u64, u64)>,
+    text: &str,
+    elapsed: Duration,
+    visible: bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let config = client.global_config();
+    let model = client.model();
+    let (input_tokens, output_tokens) = provider_usage.unwrap_or_else(|| {
+        // Providers that don't report usage: fall back to a local estimate.
+        let input_tokens = input
+            .prepare_completion_data(model, true)
+            .map(|data| model.total_tokens(&data.messages) as u64)
+            .unwrap_or_default();
+        (input_tokens, estimate_token_length(text) as u64)
+    });
+
+    // Account the session total even when the line isn't printed.
+    let session_tokens = {
+        let mut guard = config.write();
+        match guard.session.as_mut() {
+            Some(session) => {
+                session.add_output_tokens(output_tokens as usize);
+                Some(session.output_tokens())
+            }
+            None => None,
+        }
+    };
+
+    if !visible || !*IS_STDOUT_TERMINAL || !config.read().show_usage {
+        return;
+    }
+
+    let secs = elapsed.as_secs_f64();
+    let speed = if secs > 0.0 {
+        output_tokens as f64 / secs
+    } else {
+        0.0
+    };
+    let mut line =
+        format!("{output_tokens} out · {input_tokens} in · {speed:.1} tok/s · {secs:.2}s");
+    if let Some(session_tokens) = session_tokens {
+        line.push_str(&format!(" · session {session_tokens} out"));
+    }
+    println!("{}", dimmed_text(&line));
+}
+
 pub async fn call_chat_completions(
     input: &Input,
     print: bool,
@@ -471,18 +525,22 @@ pub async fn call_chat_completions(
     client: &dyn Client,
     abort_signal: AbortSignal,
 ) -> Result<(String, Vec<ToolResult>)> {
+    let start = Instant::now();
     let ret = abortable_run_with_spinner(
         client.chat_completions(input.clone()),
         "Generating",
         abort_signal,
     )
     .await;
+    let elapsed = start.elapsed();
 
     match ret {
         Ok(ret) => {
             let ChatCompletionsOutput {
                 mut text,
                 tool_calls,
+                input_tokens,
+                output_tokens,
                 ..
             } = ret;
             if !text.is_empty() {
@@ -500,6 +558,14 @@ pub async fn call_chat_completions(
                     }
                 }
             }
+            report_usage(
+                client,
+                input,
+                input_tokens.zip(output_tokens),
+                &text,
+                elapsed,
+                print,
+            );
             Ok((text, eval_tool_calls(client.global_config(), tool_calls)?))
         }
         Err(err) => Err(err),
@@ -515,10 +581,12 @@ pub async fn call_chat_completions_streaming(
     let mut handler = SseHandler::new(tx, abort_signal.clone());
     handler.set_hide_think(client.global_config().read().hide_think);
 
+    let start = Instant::now();
     let (send_ret, render_ret) = tokio::join!(
         client.chat_completions_streaming(input, &mut handler),
         render_stream(rx, client.global_config(), abort_signal.clone()),
     );
+    let elapsed = start.elapsed();
 
     if handler.abort().aborted() {
         bail!("Aborted.");
@@ -526,12 +594,14 @@ pub async fn call_chat_completions_streaming(
 
     render_ret?;
 
+    let usage = handler.usage();
     let (text, tool_calls) = handler.take();
     match send_ret {
         Ok(_) => {
             if !text.is_empty() && !text.ends_with('\n') {
                 println!();
             }
+            report_usage(client, input, usage, &text, elapsed, true);
             Ok((text, eval_tool_calls(client.global_config(), tool_calls)?))
         }
         Err(err) => {

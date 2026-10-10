@@ -51,7 +51,12 @@ fn prepare_chat_completions(
 
     let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
 
-    let body = openai_build_chat_completions_body(data, &self_.model, true);
+    let body = openai_build_chat_completions_body(
+        data,
+        &self_.model,
+        true,
+        self_.global_config().read().show_usage,
+    );
 
     let mut request_data = RequestData::new(url, body);
 
@@ -127,6 +132,19 @@ pub async fn openai_chat_completions_streaming(
         }
         let data: Value = serde_json::from_str(&message.data)?;
         debug!("stream-data: {data}");
+        if let Some(usage) = data["usage"].as_object() {
+            let input = usage
+                .get("prompt_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            let output = usage
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            if input > 0 || output > 0 {
+                handler.set_usage(input, output);
+            }
+        }
         if let Some(text) = data["choices"][0]["delta"]["content"]
             .as_str()
             .filter(|v| !v.is_empty())
@@ -227,7 +245,8 @@ struct EmbeddingsResBodyEmbedding {
 pub fn openai_build_chat_completions_body(
     data: ChatCompletionsData,
     model: &Model,
-    native_audio: bool // true -> "input_audio", false - "audio_url"
+    native_audio: bool, // true -> "input_audio", false - "audio_url"
+    include_usage: bool, // ask the server to report token usage in the final stream chunk
 ) -> Value {
     let ChatCompletionsData {
         messages,
@@ -337,6 +356,9 @@ pub fn openai_build_chat_completions_body(
     }
     if stream {
         body["stream"] = true.into();
+        if include_usage {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
     }
     if let Some(functions) = functions {
         body["tools"] = functions
