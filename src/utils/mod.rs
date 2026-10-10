@@ -92,6 +92,99 @@ pub fn strip_think_tag(text: &str) -> Cow<'_, str> {
     THINK_TAG_RE.replace_all(text, "")
 }
 
+const THINK_OPEN_TAG: &str = "<think>";
+const THINK_CLOSE_TAG: &str = "</think>";
+
+/// Incrementally removes `<think>...</think>` blocks from streamed text.
+///
+/// Providers emit reasoning between a literal `<think>` / `</think>` pair, and
+/// the surrounding chunks can split a tag across calls. A short tail is
+/// therefore held back until it can be classified as plain text or as the start
+/// of a tag. Call [`ThinkFilter::flush`] once the stream ends.
+#[derive(Debug, Default)]
+pub struct ThinkFilter {
+    in_think: bool,
+    skip_leading_ws: bool,
+    pending: String,
+}
+
+impl ThinkFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the visible part of `text`, dropping any reasoning block.
+    pub fn filter(&mut self, text: &str) -> String {
+        self.pending.push_str(text);
+        let mut output = String::new();
+        loop {
+            if self.in_think {
+                match self.pending.find(THINK_CLOSE_TAG) {
+                    Some(idx) => {
+                        self.pending.drain(..idx + THINK_CLOSE_TAG.len());
+                        self.in_think = false;
+                        // Swallow the blank line that separates reasoning from the reply.
+                        self.skip_leading_ws = true;
+                    }
+                    None => {
+                        let keep = suffix_prefix_len(&self.pending, THINK_CLOSE_TAG);
+                        let cut = self.pending.len() - keep;
+                        self.pending.drain(..cut);
+                        break;
+                    }
+                }
+            } else {
+                if self.skip_leading_ws {
+                    let trimmed = self.pending.trim_start();
+                    let cut = self.pending.len() - trimmed.len();
+                    self.pending.drain(..cut);
+                    if self.pending.is_empty() {
+                        break;
+                    }
+                    self.skip_leading_ws = false;
+                }
+                match self.pending.find(THINK_OPEN_TAG) {
+                    Some(idx) => {
+                        output.push_str(&self.pending[..idx]);
+                        self.pending.drain(..idx + THINK_OPEN_TAG.len());
+                        self.in_think = true;
+                    }
+                    None => {
+                        let keep = suffix_prefix_len(&self.pending, THINK_OPEN_TAG);
+                        let cut = self.pending.len() - keep;
+                        output.push_str(&self.pending[..cut]);
+                        self.pending.drain(..cut);
+                        break;
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    /// Flush the held-back tail. An unterminated reasoning block is discarded.
+    pub fn flush(&mut self) -> String {
+        let output = if self.in_think {
+            String::new()
+        } else {
+            std::mem::take(&mut self.pending)
+        };
+        self.in_think = false;
+        self.skip_leading_ws = false;
+        output
+    }
+}
+
+/// Length of the longest suffix of `text` that is a prefix of `tag`, capped at
+/// `tag.len() - 1` so a full match is always found by `find`.
+fn suffix_prefix_len(text: &str, tag: &str) -> usize {
+    let max = (tag.len() - 1).min(text.len());
+    (1..=max)
+        .rev()
+        .find(|&len| text.ends_with(&tag[..len]))
+        .unwrap_or(0)
+}
+
 pub fn extract_code_block(text: &str) -> &str {
     CODE_BLOCK_RE
         .captures(text)
@@ -224,6 +317,59 @@ pub fn decode_bin<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_think_filter(chunks: &[&str]) -> String {
+        let mut filter = ThinkFilter::new();
+        let mut output = String::new();
+        for chunk in chunks {
+            output.push_str(&filter.filter(chunk));
+        }
+        output.push_str(&filter.flush());
+        output
+    }
+
+    #[test]
+    fn test_think_filter_removes_block() {
+        assert_eq!(
+            run_think_filter(&["<think>\nreasoning\n</think>\n\nanswer"]),
+            "answer"
+        );
+        assert_eq!(run_think_filter(&["plain answer"]), "plain answer");
+        assert_eq!(run_think_filter(&["<think>only reasoning</think>"]), "");
+        // an unterminated block is dropped
+        assert_eq!(run_think_filter(&["<think>\nreasoning"]), "");
+        // a longer word that merely starts like the tag is kept
+        assert_eq!(run_think_filter(&["<thinker>"]), "<thinker>");
+    }
+
+    #[test]
+    fn test_think_filter_provider_chunk_sequence() {
+        // Mirrors the events emitted by the openai/claude/bedrock streaming handlers.
+        assert_eq!(
+            run_think_filter(&["<think>\n", "step 1\n", "step 2", "\n</think>\n\n", "Hello"]),
+            "Hello"
+        );
+    }
+
+    #[test]
+    fn test_think_filter_split_chunks() {
+        let input = "before <think>\nsecret\n</think>\nafter";
+        let expected = "before after";
+        for i in 1..input.len() {
+            if !input.is_char_boundary(i) {
+                continue;
+            }
+            assert_eq!(
+                run_think_filter(&[&input[..i], &input[i..]]),
+                expected,
+                "split at byte {i}"
+            );
+        }
+        // character by character
+        let chunks: Vec<String> = input.chars().map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        assert_eq!(run_think_filter(&refs), expected);
+    }
 
     #[test]
     #[cfg(not(target_os = "windows"))]

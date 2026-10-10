@@ -54,6 +54,9 @@ pub struct Cli {
     /// Turn off stream mode
     #[clap(short = 'S', long)]
     pub no_stream: bool,
+    /// Hide the model's reasoning (`<think>...</think>`) in the output
+    #[clap(long)]
+    pub hide_think: bool,
     /// Display the message without sending it
     #[clap(long)]
     pub dry_run: bool,

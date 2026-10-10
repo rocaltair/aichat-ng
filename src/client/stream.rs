@@ -1,5 +1,5 @@
 use super::{catch_error, ToolCall};
-use crate::utils::AbortSignal;
+use crate::utils::{AbortSignal, ThinkFilter};
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{Stream, StreamExt};
@@ -13,6 +13,7 @@ pub struct SseHandler {
     abort_signal: AbortSignal,
     buffer: String,
     tool_calls: Vec<ToolCall>,
+    think_filter: Option<ThinkFilter>,
 }
 
 impl SseHandler {
@@ -22,7 +23,14 @@ impl SseHandler {
             abort_signal,
             buffer: String::new(),
             tool_calls: Vec::new(),
+            think_filter: None,
         }
+    }
+
+    /// Drop `<think>...</think>` blocks from the emitted text. The full text is
+    /// still kept in `buffer`, so session history is unaffected.
+    pub fn set_hide_think(&mut self, hide: bool) {
+        self.think_filter = if hide { Some(ThinkFilter::new()) } else { None };
     }
 
     pub fn text(&mut self, text: &str) -> Result<()> {
@@ -31,6 +39,17 @@ impl SseHandler {
             return Ok(());
         }
         self.buffer.push_str(text);
+        let text = match self.think_filter.as_mut() {
+            Some(filter) => filter.filter(text),
+            None => text.to_string(),
+        };
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.send_text(&text)
+    }
+
+    fn send_text(&self, text: &str) -> Result<()> {
         let ret = self
             .sender
             .send(SseEvent::Text(text.to_string()))
@@ -46,6 +65,12 @@ impl SseHandler {
 
     pub fn done(&mut self) {
         // debug!("HandleDone");
+        if let Some(filter) = self.think_filter.as_mut() {
+            let text = filter.flush();
+            if !text.is_empty() {
+                let _ = self.sender.send(SseEvent::Text(text));
+            }
+        }
         let ret = self.sender.send(SseEvent::Done);
         if ret.is_err() {
             if self.abort_signal.aborted() {
@@ -241,9 +266,53 @@ impl JsonStreamParser {
 mod tests {
     use super::*;
 
+    use crate::utils::create_abort_signal;
     use bytes::Bytes;
     use futures_util::stream;
     use rand::Rng;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    #[tokio::test]
+    async fn test_sse_handler_hide_think() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut handler = SseHandler::new(tx, create_abort_signal());
+        handler.set_hide_think(true);
+        for chunk in ["<think>\n", "reasoning", "\n</think>\n\n", "Hello"] {
+            handler.text(chunk).unwrap();
+        }
+        handler.done();
+
+        let mut texts = vec![];
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                SseEvent::Text(text) => texts.push(text),
+                SseEvent::Done => break,
+            }
+        }
+        assert_eq!(texts.concat(), "Hello");
+
+        // The reasoning is still buffered for session history.
+        let (buffer, _) = handler.take();
+        assert_eq!(buffer, "<think>\nreasoning\n</think>\n\nHello");
+    }
+
+    #[tokio::test]
+    async fn test_sse_handler_keeps_think_by_default() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut handler = SseHandler::new(tx, create_abort_signal());
+        handler.text("<think>\n").unwrap();
+        handler.text("Hello").unwrap();
+        handler.done();
+
+        let mut texts = vec![];
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                SseEvent::Text(text) => texts.push(text),
+                SseEvent::Done => break,
+            }
+        }
+        assert_eq!(texts.concat(), "<think>\nHello");
+    }
 
     fn split_chunks(text: &str) -> Vec<Vec<u8>> {
         let mut rng = rand::rng();

@@ -459,7 +459,14 @@ pub async fn call_chat_completions(
                     text = extract_code_block(&strip_think_tag(&text)).to_string();
                 }
                 if print {
-                    client.global_config().read().print_markdown(&text)?;
+                    let config = client.global_config();
+                    if config.read().hide_think && !extract_code {
+                        // Filter reasoning from the display only; the stored text keeps it.
+                        let text = strip_think_tag(&text);
+                        config.read().print_markdown(&text)?;
+                    } else {
+                        config.read().print_markdown(&text)?;
+                    }
                 }
             }
             Ok((text, eval_tool_calls(client.global_config(), tool_calls)?))
@@ -475,6 +482,7 @@ pub async fn call_chat_completions_streaming(
 ) -> Result<(String, Vec<ToolResult>)> {
     let (tx, rx) = unbounded_channel();
     let mut handler = SseHandler::new(tx, abort_signal.clone());
+    handler.set_hide_think(client.global_config().read().hide_think);
 
     let (send_ret, render_ret) = tokio::join!(
         client.chat_completions_streaming(input, &mut handler),

@@ -146,6 +146,9 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if cli.no_stream {
         config.write().stream = false;
     }
+    if cli.hide_think {
+        config.write().hide_think = true;
+    }
     if cli.empty_session {
         config.write().empty_session()?;
     }
