@@ -34,6 +34,30 @@ static EMBEDDING_MODEL_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static ESCAPE_SLASH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?<!\\)/").unwrap());
 
+static OPENCODE_PROCESS_SESSION: LazyLock<String> =
+    LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+/// `x-opencode-session` value for the OpenCode gateway (opencode.ai): requests without it
+/// are rejected (Go endpoint), and the value must stay stable within one conversation for
+/// sticky routing + prompt caching. Derived from the aichat session name — stable across
+/// restarts; one UUID per process when no session is active (one-shot, serve).
+fn opencode_session_value(session_name: Option<&str>) -> String {
+    match session_name.filter(|v| !v.is_empty()) {
+        Some(name) => {
+            let h = sha256(name);
+            format!(
+                "{}-{}-{}-{}-{}",
+                &h[0..8],
+                &h[8..12],
+                &h[12..16],
+                &h[16..20],
+                &h[20..32]
+            )
+        }
+        None => OPENCODE_PROCESS_SESSION.clone(),
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Client: Sync + Send {
     fn global_config(&self) -> &GlobalConfig;
@@ -173,6 +197,13 @@ pub trait Client: Sync + Send {
     }
 
     fn patch_request_data(&self, request_data: &mut RequestData) {
+        if self.name().starts_with("opencode") || request_data.url.contains("opencode.ai") {
+            let value = {
+                let config = self.global_config().read();
+                opencode_session_value(config.session.as_ref().map(|s| s.name()))
+            };
+            request_data.header("x-opencode-session", value);
+        }
         let model_type = self.model().model_type();
         if let Some(patch) = self.model().patch() {
             request_data.apply_patch(patch.clone());
@@ -711,4 +742,26 @@ fn prompt_input_string(
     }
     let text = text.prompt()?;
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opencode_session_value() {
+        // stable per aichat session (derived, so also across restarts)
+        let a = opencode_session_value(Some("chat"));
+        assert_eq!(a, opencode_session_value(Some("chat")));
+        assert_ne!(a, opencode_session_value(Some("other")));
+        // no session → one value per process, empty name falls back too
+        assert_eq!(opencode_session_value(None), opencode_session_value(None));
+        assert_eq!(
+            opencode_session_value(Some("")),
+            opencode_session_value(None)
+        );
+        assert_ne!(a, opencode_session_value(None));
+        // canonical uuid shape
+        assert!(uuid::Uuid::try_parse(&a).is_ok());
+    }
 }
