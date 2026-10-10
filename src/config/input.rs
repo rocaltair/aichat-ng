@@ -5,7 +5,7 @@ use crate::client::{
     MessageContent, MessageContentPart, MessageContentToolCalls, MessageRole, Model,
 };
 use crate::function::ToolResult;
-use crate::utils::{base64_encode, is_loader_protocol, sha256, AbortSignal};
+use crate::utils::{base64_encode, is_loader_protocol, sha256, split_think_tag, AbortSignal};
 
 use anyhow::{bail, Context, Result};
 use indexmap::IndexSet;
@@ -232,6 +232,16 @@ impl Input {
     }
 
     pub fn merge_tool_results(mut self, output: String, tool_results: Vec<ToolResult>) -> Self {
+        // Providers in thinking mode require the reasoning that produced a tool
+        // call to be echoed back together with it.
+        let reasoning = split_think_tag(&output).1;
+        let tool_results: Vec<ToolResult> = tool_results
+            .into_iter()
+            .map(|mut tool_result| {
+                tool_result.set_reasoning(reasoning);
+                tool_result
+            })
+            .collect();
         match self.tool_calls.as_mut() {
             Some(exist_tool_results) => {
                 exist_tool_results.merge(tool_results, output);

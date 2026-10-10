@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::utils::strip_think_tag;
+use crate::utils::split_think_tag;
 
 use anyhow::{bail, Context, Result};
 use reqwest::RequestBuilder;
@@ -242,6 +242,16 @@ struct EmbeddingsResBodyEmbedding {
     embedding: Vec<f32>,
 }
 
+/// Build an assistant message carrying `tool_calls`, echoing the turn's
+/// reasoning when the provider requires it (DeepSeek thinking mode).
+fn tool_calls_message(tool_calls: Vec<Value>, reasoning: &str) -> Value {
+    let mut message = json!({ "role": MessageRole::Assistant, "tool_calls": tool_calls });
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
+    message
+}
+
 pub fn openai_build_chat_completions_body(
     data: ChatCompletionsData,
     model: &Model,
@@ -255,6 +265,11 @@ pub fn openai_build_chat_completions_body(
         functions,
         stream,
     } = data;
+
+    // DeepSeek's thinking mode requires the assistant's `reasoning_content` to be
+    // echoed back on every subsequent request that carries `tools`, otherwise the
+    // API rejects the call with a 400.
+    let pass_reasoning = functions.is_some();
 
     let messages_len = messages.len();
     let messages: Vec<Value> = messages
@@ -270,9 +285,16 @@ pub fn openai_build_chat_completions_body(
             match &content {
                 MessageContent::ToolCalls(MessageContentToolCalls {
                     tool_results,
-                    text: _,
+                    text,
                     sequence,
                 }) => {
+                    // Reasoning of the first turn, used as a fallback for tool
+                    // results stored before the per-call reasoning was tracked.
+                    let fallback_reasoning = if pass_reasoning {
+                        split_think_tag(text).1
+                    } else {
+                        ""
+                    };
                     if !sequence {
                         let tool_calls: Vec<_> = tool_results
                             .iter()
@@ -287,9 +309,12 @@ pub fn openai_build_chat_completions_body(
                                 })
                             })
                             .collect();
-                        let mut messages = vec![
-                            json!({ "role": MessageRole::Assistant, "tool_calls": tool_calls }),
-                        ];
+                        let reasoning = tool_results
+                            .iter()
+                            .map(|tool_result| tool_result.reasoning.as_str())
+                            .find(|reasoning| !reasoning.is_empty())
+                            .unwrap_or(fallback_reasoning);
+                        let mut messages = vec![tool_calls_message(tool_calls, reasoning)];
                         for tool_result in tool_results {
                             messages.push(json!({
                                 "role": "tool",
@@ -300,20 +325,23 @@ pub fn openai_build_chat_completions_body(
                         messages
                     } else {
                         tool_results.iter().flat_map(|tool_result| {
-                            vec![
+                            let reasoning = if tool_result.reasoning.is_empty() {
+                                fallback_reasoning
+                            } else {
+                                tool_result.reasoning.as_str()
+                            };
+                            let tool_calls = vec![
                                 json!({
-                                    "role": MessageRole::Assistant,
-                                    "tool_calls": [
-                                        {
-                                            "id": tool_result.call.id,
-                                            "type": "function",
-                                            "function": {
-                                                "name": tool_result.call.name,
-                                                "arguments": tool_result.call.arguments.to_string(),
-                                            },
-                                        }
-                                    ]
-                                }),
+                                    "id": tool_result.call.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_result.call.name,
+                                        "arguments": tool_result.call.arguments.to_string(),
+                                    },
+                                })
+                            ];
+                            vec![
+                                tool_calls_message(tool_calls, reasoning),
                                 json!({
                                     "role": "tool",
                                     "content": tool_result.output.to_string(),
@@ -324,8 +352,12 @@ pub fn openai_build_chat_completions_body(
                     }
                 }
                 MessageContent::Text(text) if role.is_assistant() && i != messages_len - 1 => {
-                    vec![json!({ "role": role, "content": strip_think_tag(text) }
-                    )]
+                    let (content, reasoning) = split_think_tag(text);
+                    let mut message = json!({ "role": role, "content": content });
+                    if pass_reasoning && !reasoning.is_empty() {
+                        message["reasoning_content"] = json!(reasoning);
+                    }
+                    vec![message]
                 }
                 _ => vec![json!({ "role": role, "content": content_value })],
             }
@@ -608,6 +640,7 @@ fn audio_mime_type(path: &std::path::Path) -> String {
 mod openai_audio_video_tests {
     use super::*;
     use crate::client::message::{MessageContent, MessageContentPart, MediaUrl};
+    use crate::function::ToolResult;
 
     #[test]
     fn test_build_body_with_audio_native() {
@@ -623,6 +656,108 @@ mod openai_audio_video_tests {
         assert_eq!(arr[0]["type"], "input_audio");
         assert_eq!(arr[0]["input_audio"]["data"], "abc123");
         assert_eq!(arr[0]["input_audio"]["format"], "mp3");
+    }
+
+    #[test]
+    fn test_assistant_reasoning_passed_back_when_tools_present() {
+        let model = Model::new("openai", "gpt-4o");
+        let messages = vec![
+            Message::new(
+                MessageRole::Assistant,
+                MessageContent::Text("<think>\nwhy\n</think>\n\nanswer".to_string()),
+            ),
+            Message::new(MessageRole::User, MessageContent::Text("next".to_string())),
+        ];
+        let data = ChatCompletionsData {
+            messages: messages.clone(),
+            temperature: None,
+            top_p: None,
+            functions: Some(vec![]),
+            stream: false,
+        };
+        let body = openai_build_chat_completions_body(data, &model, true, false);
+        assert_eq!(body["messages"][0]["content"], "answer");
+        assert_eq!(body["messages"][0]["reasoning_content"], "why");
+
+        // Without tools in the request the reasoning is dropped, as before.
+        let data = ChatCompletionsData {
+            messages,
+            temperature: None,
+            top_p: None,
+            functions: None,
+            stream: false,
+        };
+        let body = openai_build_chat_completions_body(data, &model, true, false);
+        assert_eq!(body["messages"][0]["content"], "answer");
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_assistant_tool_call_reasoning_passed_back() {
+        let model = Model::new("openai", "gpt-4o");
+        let call = ToolCall::new(
+            "web_search".to_string(),
+            json!({ "q": "x" }),
+            Some("id1".to_string()),
+        );
+        let tool_calls = MessageContentToolCalls::new(
+            vec![ToolResult::new(call, json!("result"))],
+            "<think>\nwhy\n</think>\n\n".to_string(),
+        );
+        let messages = vec![Message::new(
+            MessageRole::Assistant,
+            MessageContent::ToolCalls(tool_calls),
+        )];
+        let data = ChatCompletionsData {
+            messages,
+            temperature: None,
+            top_p: None,
+            functions: Some(vec![]),
+            stream: false,
+        };
+        let body = openai_build_chat_completions_body(data, &model, true, false);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["reasoning_content"], "why");
+        assert_eq!(msgs[0]["tool_calls"][0]["function"]["name"], "web_search");
+        assert_eq!(msgs[1]["role"], "tool");
+    }
+
+    #[test]
+    fn test_sequence_tool_calls_use_per_turn_reasoning() {
+        let model = Model::new("openai", "gpt-4o");
+        let mut first = ToolResult::new(
+            ToolCall::new("a".to_string(), json!({}), Some("id1".to_string())),
+            json!("r1"),
+        );
+        first.set_reasoning("why1");
+        let mut second = ToolResult::new(
+            ToolCall::new("b".to_string(), json!({}), Some("id2".to_string())),
+            json!("r2"),
+        );
+        second.set_reasoning("why2");
+        // Two tool rounds merged → `sequence` mode.
+        let mut tool_calls = MessageContentToolCalls::new(vec![first], String::new());
+        tool_calls.merge(vec![second], String::new());
+        let messages = vec![Message::new(
+            MessageRole::Assistant,
+            MessageContent::ToolCalls(tool_calls),
+        )];
+        let data = ChatCompletionsData {
+            messages,
+            temperature: None,
+            top_p: None,
+            functions: Some(vec![]),
+            stream: false,
+        };
+        let body = openai_build_chat_completions_body(data, &model, true, false);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["reasoning_content"], "why1");
+        assert_eq!(msgs[0]["tool_calls"][0]["function"]["name"], "a");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[2]["reasoning_content"], "why2");
+        assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "b");
+        assert_eq!(msgs[3]["role"], "tool");
     }
 
     #[test]

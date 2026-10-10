@@ -37,6 +37,9 @@ pub static CODE_BLOCK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?ms)```\w*(.*)```").unwrap());
 pub static THINK_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)^\s*<think>.*?</think>(\s*|$)").unwrap());
+/// Like [`THINK_TAG_RE`], but captures the reasoning itself (group 1).
+static THINK_BLOCK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)^\s*<think>(.*?)</think>\s*").unwrap());
 pub static IS_STDOUT_TERMINAL: LazyLock<bool> = LazyLock::new(|| std::io::stdout().is_terminal());
 pub static NO_COLOR: LazyLock<bool> = LazyLock::new(|| {
     env::var("NO_COLOR")
@@ -90,6 +93,19 @@ pub fn estimate_token_length(text: &str) -> usize {
 
 pub fn strip_think_tag(text: &str) -> Cow<'_, str> {
     THINK_TAG_RE.replace_all(text, "")
+}
+
+/// Split a leading `<think>...</think>` block off `text`, returning
+/// `(content, reasoning)`. `reasoning` is empty when there is no such block.
+pub fn split_think_tag(text: &str) -> (&str, &str) {
+    match THINK_BLOCK_RE.captures(text).ok().flatten() {
+        Some(caps) => {
+            let end = caps.get(0).map(|m| m.end()).unwrap_or_default();
+            let reasoning = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
+            (&text[end..], reasoning)
+        }
+        None => (text, ""),
+    }
 }
 
 const THINK_OPEN_TAG: &str = "<think>";
@@ -326,6 +342,20 @@ mod tests {
         }
         output.push_str(&filter.flush());
         output
+    }
+
+    #[test]
+    fn test_split_think_tag() {
+        assert_eq!(
+            split_think_tag("<think>\nwhy\n</think>\n\nanswer"),
+            ("answer", "why")
+        );
+        assert_eq!(split_think_tag("answer"), ("answer", ""));
+        // The content half must stay equivalent to `strip_think_tag`.
+        assert_eq!(
+            strip_think_tag("<think>\nwhy\n</think>\n\nanswer"),
+            "answer"
+        );
     }
 
     #[test]

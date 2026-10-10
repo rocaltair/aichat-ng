@@ -47,11 +47,26 @@ pub fn eval_tool_calls(config: &GlobalConfig, mut calls: Vec<ToolCall>) -> Resul
 pub struct ToolResult {
     pub call: ToolCall,
     pub output: Value,
+    /// The assistant reasoning that produced this tool call. Providers in
+    /// thinking mode (DeepSeek) require it to be echoed back with the call.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
 }
 
 impl ToolResult {
     pub fn new(call: ToolCall, output: Value) -> Self {
-        Self { call, output }
+        Self {
+            call,
+            output,
+            reasoning: String::new(),
+        }
+    }
+
+    /// Attach the reasoning that produced this tool call, unless already set.
+    pub fn set_reasoning(&mut self, reasoning: &str) {
+        if self.reasoning.is_empty() {
+            self.reasoning = reasoning.to_string();
+        }
     }
 }
 
