@@ -1,5 +1,6 @@
 mod cli;
 mod client;
+mod completion;
 mod config;
 mod function;
 mod rag;
@@ -35,6 +36,10 @@ use std::{env, process, sync::Arc};
 async fn main() -> Result<()> {
     load_env_file()?;
     let cli = Cli::parse();
+    if cli.zsh_complete {
+        print!("{}", completion::zsh());
+        return Ok(());
+    }
     let text = cli.text()?;
     let working_mode = if cli.serve.is_some() {
         WorkingMode::Serve

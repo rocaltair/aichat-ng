@@ -63,6 +63,9 @@ pub struct Cli {
     /// Turn off the usage line after each response
     #[clap(long)]
     pub no_show_usage: bool,
+    /// Generate the zsh completion script
+    #[clap(long)]
+    pub zsh_complete: bool,
     /// Display the message without sending it
     #[clap(long)]
     pub dry_run: bool,
