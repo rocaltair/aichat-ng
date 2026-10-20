@@ -57,8 +57,19 @@ async fn main() -> Result<()> {
         || cli.list_macros
         || cli.list_sessions;
     setup_logger(working_mode.is_serve())?;
+    if !working_mode.is_serve() {
+        // A Ctrl+C must abort the in-flight turn (which persists it) instead of
+        // killing the process: the session only reaches disk on a normal exit,
+        // so a signal during a tool call used to drop the conversation.
+        install_ctrlc_handler();
+    }
     let config = Arc::new(RwLock::new(Config::init(working_mode, info_flag).await?));
-    if let Err(err) = run(config, cli, text).await {
+    if let Err(err) = run(config.clone(), cli, text).await {
+        // An abnormal exit used to drop the whole conversation: the session is
+        // only written on exit, so a failing tool call left nothing on disk.
+        if let Err(save_err) = config.write().exit_session_on_error() {
+            render_error(save_err);
+        }
         render_error(err);
         std::process::exit(1);
     }
@@ -216,7 +227,7 @@ async fn start_directive(
     let client = input.create_client()?;
     let extract_code = !*IS_STDOUT_TERMINAL && code_mode;
     config.write().before_chat_completion(&input)?;
-    let (output, tool_results) = if !input.stream() || extract_code {
+    let ret = if !input.stream() || extract_code {
         call_chat_completions(
             &input,
             true,
@@ -224,9 +235,21 @@ async fn start_directive(
             client.as_ref(),
             abort_signal.clone(),
         )
-        .await?
+        .await
     } else {
-        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await?
+        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await
+    };
+    let (output, tool_results) = match ret {
+        Ok(ret) => ret,
+        Err(err) => {
+            // Keep the turn's context: a failing tool call aborts the run, and
+            // without this the last user message was never recorded (see
+            // Config::save_interrupted_turn).
+            if let Err(save_err) = config.write().save_interrupted_turn(&input, &err) {
+                render_error(save_err);
+            }
+            return Err(err);
+        }
     };
     config
         .write()

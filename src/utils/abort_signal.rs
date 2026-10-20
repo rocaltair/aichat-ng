@@ -10,6 +10,42 @@ use std::{
 
 pub type AbortSignal = Arc<AbortSignalInner>;
 
+/// Process-wide record of a Ctrl+C.
+///
+/// SIGINT handling must not depend on which request-scoped future happens to be
+/// polled: while a tool call runs — or a streaming reply is rendered without raw
+/// mode — nothing awaits `tokio::signal::ctrl_c()`, so the terminal's default
+/// disposition would kill the process with the whole conversation still in
+/// memory. The handler installed by `install_ctrlc_handler` records the
+/// interrupt here instead, and every `AbortSignal` observes it.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
+pub fn clear_interrupted() {
+    INTERRUPTED.store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub fn set_interrupted(value: bool) {
+    INTERRUPTED.store(value, Ordering::SeqCst);
+}
+
+/// Install the process-wide Ctrl+C handler; call once from the CLI entry point.
+/// Not used in serve mode, where SIGINT should stop the server.
+pub fn install_ctrlc_handler() {
+    tokio::spawn(async {
+        loop {
+            if tokio::signal::ctrl_c().await.is_err() {
+                break;
+            }
+            INTERRUPTED.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
 pub struct AbortSignalInner {
     ctrlc: AtomicBool,
     ctrld: AtomicBool,
@@ -38,7 +74,7 @@ impl AbortSignalInner {
     }
 
     pub fn aborted_ctrlc(&self) -> bool {
-        self.ctrlc.load(Ordering::SeqCst)
+        self.ctrlc.load(Ordering::SeqCst) || interrupted()
     }
 
     pub fn aborted_ctrld(&self) -> bool {
@@ -48,6 +84,7 @@ impl AbortSignalInner {
     pub fn reset(&self) {
         self.ctrlc.store(false, Ordering::SeqCst);
         self.ctrld.store(false, Ordering::SeqCst);
+        clear_interrupted();
     }
 
     pub fn set_ctrlc(&self) {

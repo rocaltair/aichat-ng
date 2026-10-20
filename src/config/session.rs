@@ -412,6 +412,17 @@ impl Session {
     }
 
     pub fn exit(&mut self, session_dir: &Path, is_repl: bool) -> Result<()> {
+        self.exit_inner(session_dir, is_repl, true)
+    }
+
+    /// Save the session on an abnormal exit (a failing tool call, a request
+    /// error). Like `exit`, but never prompts: the process is dying, and an
+    /// interactive prompt there would hang a run that has no usable terminal.
+    pub fn exit_on_error(&mut self, session_dir: &Path) -> Result<()> {
+        self.exit_inner(session_dir, false, false)
+    }
+
+    fn exit_inner(&mut self, session_dir: &Path, is_repl: bool, allow_prompt: bool) -> Result<()> {
         let mut save_session = self.save_session();
         if self.save_session_this_time {
             save_session = Some(true);
@@ -420,7 +431,7 @@ impl Session {
             let mut session_dir = session_dir.to_path_buf();
             let mut session_name = self.name().to_string();
             if save_session.is_none() {
-                if !is_repl {
+                if !is_repl || !allow_prompt {
                     return Ok(());
                 }
                 let ans = Confirm::new("Save session?").with_default(false).prompt()?;

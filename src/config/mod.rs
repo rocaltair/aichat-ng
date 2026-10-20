@@ -1171,6 +1171,17 @@ impl Config {
         Ok(())
     }
 
+    /// Save the session on an abnormal exit (see `save_interrupted_turn`).
+    /// Never prompts, and only writes the session when saving was requested.
+    pub fn exit_session_on_error(&mut self) -> Result<()> {
+        if let Some(mut session) = self.session.take() {
+            let sessions_dir = self.sessions_dir();
+            session.exit_on_error(&sessions_dir)?;
+            self.discontinuous_last_message();
+        }
+        Ok(())
+    }
+
     pub fn save_session(&mut self, name: Option<&str>) -> Result<()> {
         let session_name = match &self.session {
             Some(session) => match name {
@@ -2088,6 +2099,29 @@ impl Config {
             self.save_message(input, &output)?;
         }
         Ok(())
+    }
+
+    /// Persist a turn that aborted before producing a reply — a tool call that
+    /// exited abnormally (`Tool call exit with N`), a request error, a
+    /// cancelled request. Tool results are only recorded once the whole
+    /// tool-calling sequence succeeds, so without this the user's message
+    /// vanished from the session and the history, and the next request lost
+    /// the context of the failed turn.
+    ///
+    /// The turn is stored as the user message plus an assistant note carrying
+    /// the error: the history stays well-formed (roles alternate) and the
+    /// model sees that its previous turn was interrupted. `last_message` is
+    /// deliberately left alone, as in `before_chat_completion`.
+    pub fn save_interrupted_turn(&mut self, input: &Input, err: &anyhow::Error) -> Result<()> {
+        // `.regenerate` / `.continue` re-run a turn that is already stored;
+        // recording it again would duplicate or overwrite it.
+        if input.regenerate().is_some() || input.continue_output().is_some() {
+            return Ok(());
+        }
+        if self.dry_run {
+            return Ok(());
+        }
+        self.save_message(input, &format!("(interrupted) {err}"))
     }
 
     fn discontinuous_last_message(&mut self) {

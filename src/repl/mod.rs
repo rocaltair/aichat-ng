@@ -833,10 +833,23 @@ async fn ask(
 
     let client = input.create_client()?;
     config.write().before_chat_completion(&input)?;
-    let (output, tool_results) = if input.stream() {
-        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await?
+    let ret = if input.stream() {
+        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await
     } else {
-        call_chat_completions(&input, true, false, client.as_ref(), abort_signal.clone()).await?
+        call_chat_completions(&input, true, false, client.as_ref(), abort_signal.clone()).await
+    };
+    let (output, tool_results) = match ret {
+        Ok(ret) => ret,
+        Err(err) => {
+            // A tool call that exits abnormally (or any other request error)
+            // used to take the whole turn with it: tool results are only
+            // recorded once the sequence completes, so the user message never
+            // reached the session and the next request lost its context.
+            if let Err(save_err) = config.write().save_interrupted_turn(&input, &err) {
+                render_error(save_err);
+            }
+            return Err(err);
+        }
     };
     config
         .write()

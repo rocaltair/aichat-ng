@@ -83,11 +83,39 @@ pub fn run_command<T: AsRef<OsStr>>(
     args: &[T],
     envs: Option<HashMap<String, String>>,
 ) -> Result<i32> {
-    let status = Command::new(cmd)
+    let mut child = Command::new(cmd)
         .args(args.iter())
         .envs(envs.unwrap_or_default())
-        .status()?;
-    Ok(status.code().unwrap_or_default())
+        .spawn()?;
+    // Wait in a polling loop so that a Ctrl+C during a long-running command
+    // kills it and aborts the turn. Blocking in `status()` instead let the
+    // process die with the conversation still in memory, losing the user's
+    // last message (it is only written to the session on a normal exit).
+    loop {
+        if interrupted() {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Aborted!");
+        }
+        if let Some(status) = child.try_wait()? {
+            if status.code().is_none() {
+                // Killed by a signal — most likely the same Ctrl+C, which the
+                // handler records a moment later. Give it that moment, so the
+                // interrupt isn't mistaken for a failed tool.
+                for _ in 0..10 {
+                    if interrupted() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                if interrupted() {
+                    bail!("Aborted!");
+                }
+            }
+            return Ok(status.code().unwrap_or_default());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 pub fn run_command_with_output<T: AsRef<OsStr>>(
@@ -225,5 +253,30 @@ fn get_history_file(shell: &str) -> Option<PathBuf> {
         "ksh" => Some(home_dir()?.join(".ksh_history")),
         "tcsh" => Some(home_dir()?.join(".history")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_command_aborts_on_interrupt() {
+        clear_interrupted();
+        let setter = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            set_interrupted(true);
+        });
+        let start = Instant::now();
+        let ret = run_command("sleep", &["30"], None);
+        setter.join().unwrap();
+        clear_interrupted();
+        assert!(ret.is_err(), "interrupted command must not report success");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "command kept running after the interrupt"
+        );
     }
 }
